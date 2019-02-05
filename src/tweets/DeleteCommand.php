@@ -1,6 +1,7 @@
 <?php namespace Tweets;
 
-use League\Csv\Reader;
+use Abraham\TwitterOAuth\TwitterOAuth;
+
 use Symfony\Component\Yaml\Yaml;
 use Symfony\Component\Console\Command\Command;
 use Symfony\Component\Console\Input\InputOption;
@@ -14,41 +15,48 @@ class DeleteCommand extends Command
     use Helpers;
 
     protected $config = [];
+
+    /** @var TwitterOAuth $connector */
     protected $connector;
+
+    /** @var InputInterface $input */
+    protected $input;
+
+    /** @var OutputInterface $output */
+    protected $output;
+
+    /** @var array $skips */
+    protected $skips;
+
+    /** @var string $start_id */
+    protected $start_id;
 
     protected function configure()
     {
         $this->setName('tweets:delete')
-             ->addArgument(
-                 'file',
-                 InputArgument::OPTIONAL,
-                 'Path to the file to process'
-             )
              ->addOption(
                  'skip',
-                 's',
+                 'i',
                  InputOption::VALUE_OPTIONAL | InputOption::VALUE_IS_ARRAY,
-                 'Put the id of the tweet to skip'
+                 'An ID of a specific Tweet to Skip'
              )
              ->addOption(
-                 'offset',
-                 'o',
-                 InputOption::VALUE_OPTIONAL,
-                 'Set the offset to start with',
-                 0
-             )
-             ->addOption(
-                 'limit',
+                 'with-likes',
                  'l',
-                 InputOption::VALUE_OPTIONAL,
-                 'Set the limit to work on',
-                 4000
+                 InputOption::VALUE_NONE,
+                 'Enable the option to also delete likes'
+             )
+             ->addOption(
+                 'start',
+                 's',
+                 InputOption::VALUE_REQUIRED,
+                 'Set the initial offset to start processing in order'
              )
              ->addOption(
                  'all',
                  'a',
                  InputOption::VALUE_NONE,
-                 'Force to delete all tweets'
+                 'Delete all possible content'
              );
     }
 
@@ -57,7 +65,6 @@ class DeleteCommand extends Command
         $filePath = __DIR__ . '/../../config/config.yml';
 
         $this->checkFileExistence($filePath, $output);
-
 
         try {
             $this->config = Yaml::parse(file_get_contents($filePath))['Tweets'];
@@ -70,108 +77,85 @@ class DeleteCommand extends Command
 
     protected function execute(InputInterface $input, OutputInterface $output)
     {
-        $filePath = $input->getArgument('file');
-        $offset = $input->getOption('offset');
-        $limit = $input->getOption('limit');
-        $tweetToSkip = $input->getOption('skip');
-        $force = $input->getOption('all');
+        $this->input = $input;
+        $this->output = $output;
 
+        $this->skips = $input->getOption('skip');
+        $this->start_id = $input->getOption('start');
 
-        if (!$force && (int)$limit > 4000) {
-            $output->writeln('<error>Bigger limit number cause time out.</error>');
-            exit;
+        $this->delete_tweets();
+
+        if($input->hasOption('with-likes') || $input->hasOption('all')) {
+            $this->delete_likes();
         }
-
-        $this->checkFileExistence($filePath, $output);
-        $csvFile = $this->readCSVFile($filePath);
-
-        if ($force) {
-            $this->deleteAll([
-                $csvFile, $output, $tweetToSkip, $offset, $limit
-            ]);
-
-            $limit = $csvFile->count();
-        } else {
-            $this->limitedDelete([
-                $csvFile, $output, $tweetToSkip, $offset, $limit
-            ]);
-        }
-
-        $output->writeln(sprintf('We have deleted %s tweets.', $limit));
     }
 
-    private function readCSVFile($filePath)
+    private function delete_tweets()
     {
-        $csv = Reader::createFromPath($filePath);
-        $csv->setHeaderOffset(0);
+        $json = json_decode(file_get_contents('tweets.json'));
+        $data = array_reverse($json);
+        $count = 0;
+        $processing = is_null($this->start_id);
 
-        return $csv;
-    }
-
-    private function deleteAll(array $options)
-    {
-        list($csvFile, $output, $tweetToSkip, $offset, $limit) = $options;
-
-        $tweets = collect($csvFile->getIterator());
-        $tweets->reverse()
-            ->slice($offset)
-            ->chunk($limit)
-            ->each(function ($item) use ($output, $tweetToSkip) {
-                $item->each(function ($tweet) use ($output, $tweetToSkip) {
-                    if (!in_array($tweet['tweet_id'], $tweetToSkip, true)) {
-                        $result = $this->connector->post('statuses/destroy', ['id' => $tweet['tweet_id']]);
-                        if (property_exists($result, 'text')) {
-                            $output->writeln(sprintf(
-                                '<comment>[OK]</comment> Deleting: "%s" which was created at: %s',
-                                $result->text,
-                                $result->created_at
-                            ));
-                        } else {
-                            $output->writeln(sprintf(
-                                '<error>[ERR]</error> Tweet with the ID: "%s" has been <error>deleted</error>.',
-                                $tweet['tweet_id']
-                            ));
-                        }
-                    } else {
-                        $output->writeln(sprintf(
-                            '<comment>[NOTE]</comment> Tweet with the ID: "%s" has been skipped.',
-                            $tweet['tweet_id']
-                        ));
-                    }
-                });
-            });
-
-        return $tweets->count();
-    }
-
-    private function limitedDelete(array $options)
-    {
-        list($csvFile, $output, $tweetToSkip, $offset, $limit) = $options;
-        collect($csvFile->getIterator())
-            ->reverse()
-            ->slice($offset)
-            ->take($limit)
-            ->each(function ($item) use ($output, $tweetToSkip) {
-                if (!in_array($item['tweet_id'], $tweetToSkip, true)) {
-                    $result = $this->connector->post('statuses/destroy', ['id' => $item['tweet_id']]);
-                    if (property_exists($result, 'text')) {
-                        $output->writeln(sprintf(
-                            '<comment>[OK]</comment> Deleting: "%s" which was created at: %s',
-                            $result->text,
-                            $result->created_at
-                        ));
-                    } else {
-                        $output->writeln(sprintf(
-                            '<error>[ERR]</error> Tweet with the ID: "%s" has been <error>deleted</error>.',
-                            $item['tweet_id']
-                        ));
-                    }
-                } else {
-                    $output->writeln(sprintf(
-                        '<comment>[NOTE]</comment> Tweet with the ID: "%s" has been skipped.',
-                        $item['tweet_id']
-                    ));
+        foreach($data as $tweet)
+        {
+            if(!$processing) {
+                if($this->start_id != $tweet->id) {
+                    continue;
                 }
-            });
+                $processing = true;
+            }
+
+            if(in_array($tweet->id, $this->skips)) {
+                $this->output->writeln(sprintf('Skipping ' . $tweet->id));
+                continue;
+            }
+
+            $result = $this->connector->post('statuses/destroy', ['id' => $tweet->id]);
+
+            if (property_exists($result, 'text')) {
+                $this->output->writeln(sprintf(
+                    '<comment>[OK]</comment> Deleting: "%s" which was created at: %s',
+                    $result->id,
+                    $result->created_at
+                ));
+                $count++;
+            } else {
+                $this->output->writeln(sprintf(
+                    '<error>[ERR]</error> Tweet with the ID: "%s" has <error>NOT</error> been deleted.',
+                    $tweet->id
+                ));
+            }
+        }
+
+        $this->output->writeln('Deleted '  . $count . ' Tweets successfully.');
+    }
+
+    private function delete_likes()
+    {
+        $json = json_decode(file_get_contents('likes.json'));
+        $data = array_reverse($json);
+        $count = 0;
+
+        foreach($data as $like)
+        {
+            $result = $this->connector->post('favorites/destroy', ['id' => $like->like->tweetId]);
+
+            if (property_exists($result, 'text')) {
+                $this->output->writeln(sprintf(
+                    '<comment>[OK]</comment> Unlike: "%s" which was created at: %s',
+                    $result->id,
+                    $result->created_at
+                ));
+                $count++;
+            } else {
+                $this->output->writeln(sprintf(
+                    '<error>[ERR]</error> Tweet with the ID: "%s" has <error>NOT</error> been unliked.',
+                    $like->like->tweetId
+                ));
+            }
+        }
+
+        $this->output->writeln('Unliked '  . $count . ' Tweets successfully.');
     }
 }

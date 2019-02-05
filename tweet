@@ -4,9 +4,9 @@
 require __DIR__ . '/vendor/autoload.php';
 
 use Symfony\Component\Console\Application;
-use Tweets\DeleteCommand;
 
 $app = new Application('Tweet Delete', '0.1');
-$app->add(new DeleteCommand);
+$app->add(new \Tweets\DeleteCommand());
+$app->add(new \Tweets\DeleteLikesCommand());
 
 $app->run();
