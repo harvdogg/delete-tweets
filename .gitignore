@@ -1,5 +1,5 @@
 .idea
 config/config.yml
 .php_cs.cache
-*.csv
+*.json
 vendor
